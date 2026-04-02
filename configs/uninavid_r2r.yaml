@@ -1,0 +1,44 @@
+# ===========================================================================
+#  GenArk Evaluation Config — UniNaVid on R2R-CE
+#  Mirrors Habitat training params from vlnce_task_uninavid_r2r.yaml
+# ===========================================================================
+
+# ---- Data & Model ----
+EPISODES_FILE:  /data1/home/clk/navid_ws/data/datasets/OpenNav_R2R-CE_100_bertidx.json
+SCENE_DATASETS: /data1/home/clk/project/genark/scene_datasets
+MODEL_PATH:     model_zoo/uninavid-7b-full-224-video-fps-1-grid-2
+
+# ---- Simulator (matches Habitat training config) ----
+SIMULATOR:
+  CAMERA_HEIGHT:    1.25      # Habitat POSITION: [0, 1.25, 0]
+  FORWARD_STEP_SIZE: 0.25    # Habitat FORWARD_STEP_SIZE
+  TURN_ANGLE:       30.0     # Habitat TURN_ANGLE (degrees)
+  ALLOW_SLIDING:    true
+  MAX_STEP_HEIGHT:  0.5
+  RGB_SENSOR:
+    WIDTH:  640
+    HEIGHT: 480
+    HFOV:   120               # Habitat HFOV
+  LIGHT_SCALE: 4.0
+
+# ---- Task ----
+TASK:
+  MAX_STEPS:       500
+  SUCCESS_DISTANCE: 3.0
+
+# ---- Parallel mode (orchestrator.py + env_worker.py) ----
+PARALLEL:
+  MODEL_GPU:      2
+  WORKER_GPUS:    [3, 4, 5, 6, 7]
+  PORT:           8100
+  MAX_PARALLEL:   300           # max episodes per scene (Vulkan VRAM) **scene**
+  MAX_CONCURRENT: null        # defaults to len(WORKER_GPUS)
+  CHUNK_SIZE:     8          # max batch size per LLM generate call (防止 OOM) **generate**
+# ---- Serial mode (genesis_uninavid_multi.py) ----
+SERIAL:
+  NUM_EPISODES:   1839
+  SAVE_IMAGES:    false
+  SAVE_FAILED_EPISODES: false
+  SAVE_DEBUG_IMAGES:    false
+  WEB_VIEWER:     false
+  WEB_PORT:       9998

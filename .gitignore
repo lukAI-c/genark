@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Symlinks to external data
+episodes
+scene_datasets
+uninavid
+
+# Output directories
+output/
+output_parallel/
+genark_web_output_gt/
+genark_web_output_uninavid/
+
+# Model zoo (symlinks to external models)
+model_zoo/
+
+# Large data files
+metrics_final.json
