@@ -66,8 +66,13 @@ class InferenceEngine:
         "forward, left, right, or stop."
     )
 
-    def __init__(self, model_path: str, chunk_size: int = 16):
+    def __init__(self, model_path: str, chunk_size: int = 16,
+                 do_sample: bool = True, temperature: float = 0.2,
+                 max_new_tokens: int = 128):
         self.chunk_size = chunk_size
+        self.do_sample = do_sample
+        self.temperature = temperature
+        self.max_new_tokens = max_new_tokens
         self.conv_mode = "vicuna_v1"
         print(f"[Engine] Loading UniNaVid from {model_path} …")
         model_name = get_model_name_from_path(model_path)
@@ -375,9 +380,9 @@ class InferenceEngine:
                     output_ids = self.model.generate(
                         inputs_embeds=batched,
                         attention_mask=attn_mask,
-                        do_sample=True,
-                        temperature=0.2,
-                        max_new_tokens=128,
+                        do_sample=self.do_sample,
+                        temperature=self.temperature,
+                        max_new_tokens=self.max_new_tokens,
                         use_cache=True,
                         stopping_criteria=[stopping],
                     )
@@ -545,11 +550,20 @@ def parse_args():
                    default="model_zoo/uninavid-7b-full-224-video-fps-1-grid-2")
     p.add_argument("--chunk_size", type=int,  default=16,
                    help="Max batch size per LLM generate call")
+    p.add_argument("--do_sample",      type=lambda x: x.lower() == "true", default=True)
+    p.add_argument("--temperature",    type=float, default=0.2)
+    p.add_argument("--max_new_tokens", type=int,   default=128)
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    _engine = InferenceEngine(args.model_path, chunk_size=args.chunk_size)
+    _engine = InferenceEngine(
+        args.model_path,
+        chunk_size=args.chunk_size,
+        do_sample=args.do_sample,
+        temperature=args.temperature,
+        max_new_tokens=args.max_new_tokens,
+    )
     # uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)

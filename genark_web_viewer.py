@@ -350,7 +350,8 @@ class WebBroadcaster:
         broadcaster.wait_for_exit()
     """
 
-    def __init__(self, output_dir="genark_web_output", port=9998, quality=85, throttle_fps=30):
+    def __init__(self, output_dir="genark_web_output", port=9998, quality=85,
+                 throttle_fps=30, video_fps=10, save_video=True):
         self._output_dir = os.path.abspath(output_dir)
         self._frames_dir = os.path.join(self._output_dir, "frames")
         self._status_path = os.path.join(self._output_dir, "status.json")
@@ -362,6 +363,9 @@ class WebBroadcaster:
         self._min_interval = 1.0 / throttle_fps if throttle_fps > 0 else 0
         self._last_save_time = 0.0
         self._port = port
+        self._video_fps = video_fps
+        self._save_video = save_video
+        self._video_path = os.path.join(self._output_dir, "playback.mp4")
 
         os.makedirs(self._frames_dir, exist_ok=True)
 
@@ -456,7 +460,7 @@ class WebBroadcaster:
             print(f"[WebViewer] 帧 {i + 1}  保存FPS={self._fps}")
 
     def finish(self):
-        """Mark simulation as finished."""
+        """Mark simulation as finished and (optionally) compile frames into MP4."""
         self._running = False
         total = self._frame_idx
         status = {
@@ -472,6 +476,39 @@ class WebBroadcaster:
         except Exception:
             pass
         print(f"[WebViewer] 完成, 共 {total} 帧")
+
+        if self._save_video and total > 0:
+            self._compile_video()
+
+    def _compile_video(self):
+        """Compile saved JPG frames into an MP4 using ffmpeg."""
+        import shutil
+        # prefer system ffmpeg which has libx264; conda ffmpeg often lacks it
+        ffmpeg_bin = "/usr/bin/ffmpeg"
+        if not os.path.isfile(ffmpeg_bin):
+            ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        if not os.path.isfile(ffmpeg_bin) and ffmpeg_bin == "ffmpeg":
+            print("[WebViewer] ffmpeg not found, skip video compilation")
+            return
+
+        pattern = os.path.join(self._frames_dir, "frame_%06d.jpg")
+        cmd = [
+            ffmpeg_bin, "-y", "-loglevel", "error",
+            "-framerate", str(self._video_fps),
+            "-i", pattern,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",  # ensure even dims
+            self._video_path,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+            size_mb = os.path.getsize(self._video_path) / 1e6
+            print(f"[WebViewer] 视频已保存: {self._video_path} ({size_mb:.1f} MB)")
+        except subprocess.CalledProcessError as e:
+            print(f"[WebViewer] ffmpeg 失败: {e.stderr.decode(errors='ignore')[:200]}")
+        except Exception as e:
+            print(f"[WebViewer] 视频合成异常: {e}")
 
     def wait_for_exit(self):
         """Block until Ctrl+C, keeping HTTP server alive for playback."""

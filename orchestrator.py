@@ -104,14 +104,19 @@ def wait_server_healthy(url: str, retries: int = 120, interval: float = 5.0):
 
 
 def start_model_server(model_gpu: int, port: int, model_path: str,
-                       log_path: str, chunk_size: int = 16) -> subprocess.Popen:
+                       log_path: str, chunk_size: int = 16,
+                       generate_cfg: dict | None = None) -> subprocess.Popen:
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(model_gpu)
+    gen = generate_cfg or {}
     cmd = [
         sys.executable, SERVER_SCRIPT,
         "--port",       str(port),
         "--model_path", model_path,
         "--chunk_size", str(chunk_size),
+        "--do_sample",      str(gen.get("DO_SAMPLE", True)),
+        "--temperature",    str(gen.get("TEMPERATURE", 0.2)),
+        "--max_new_tokens", str(gen.get("MAX_NEW_TOKENS", 128)),
     ]
     tqdm.write(f"[Orch] Starting model server on GPU {model_gpu} (log → {log_path})")
     lf = open(log_path, "w")
@@ -142,6 +147,11 @@ def run_worker(
     success_distance: float,
     progress_file:    str,
     log_file:         str,
+    web_port:         int | None = None,
+    web_env_idx:      int = 0,
+    web_output_dir:   str | None = None,
+    video_output_dir: str | None = None,
+    video_fps:        int = 5,
 ) -> dict:
     """
     Launch one env_worker.py subprocess for a single scene.
@@ -169,6 +179,14 @@ def run_worker(
         "--light_scale",   str(light_scale),
         "--success_distance", str(success_distance),
     ]
+    if web_port is not None:
+        cmd += ["--web_port", str(web_port),
+                "--web_env_idx", str(web_env_idx)]
+        if web_output_dir is not None:
+            cmd += ["--web_output_dir", web_output_dir]
+    if video_output_dir is not None:
+        cmd += ["--video_output_dir", video_output_dir,
+                "--video_fps", str(video_fps)]
 
     with open(log_file, "w") as lf:
         proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=lf)
@@ -203,6 +221,14 @@ def parse_args():
     p.add_argument("--chunk_size",       type=int, default=None)
     p.add_argument("--success_distance", type=float, default=None)
     p.add_argument("--output",           type=str, default="metrics_final.json")
+    p.add_argument("--web_base_port",    type=int, default=None,
+                   help="If set, worker w gets HTTP viewer on (web_base_port + w)")
+    p.add_argument("--web_env_idx",      type=int, default=0,
+                   help="Which env (0..N-1) in each parallel batch to broadcast")
+    p.add_argument("--video_output_dir", type=str, default=None,
+                   help="If set, save one MP4 per episode under <run_dir>/videos/<scan>/")
+    p.add_argument("--video_fps",        type=int, default=5,
+                   help="FPS for per-episode MP4 output (default: 5)")
     cli = p.parse_args()
 
     # Load YAML config and merge: CLI overrides > YAML
@@ -223,6 +249,10 @@ def parse_args():
     cli.light_scale       = cli.light_scale   if cli.light_scale is not None else sc["LIGHT_SCALE"]
     cli.success_distance  = cli.success_distance if cli.success_distance is not None else sc["SUCCESS_DISTANCE"]
 
+    # Generate params (from YAML only, no CLI override needed)
+    gen = cfg.get("GENERATE", {})
+    cli.generate_cfg = dict(gen) if gen else {}
+
     return cli
 
 
@@ -232,10 +262,13 @@ def main():
     server_url   = f"http://127.0.0.1:{args.port}"
     max_conc     = args.max_concurrent or len(args.worker_gpus)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts_min = datetime.now().strftime("%Y%m%d_%H%M")
     model_tag = os.path.basename(args.model_path.rstrip("/"))
     data_tag = os.path.splitext(os.path.basename(args.episodes_file))[0]
     out_root = os.path.join(os.path.dirname(__file__), "output_parallel")
+    # genesis_videos/<data_tag>/<ts_min>/  — shared across all workers this run
+    video_root = os.path.join(os.path.dirname(__file__), "genesis_videos", data_tag, ts_min)
     run_dir = os.path.join(out_root, f"{ts}__{model_tag}__{data_tag}__P{args.max_parallel}__C{max_conc}")
     os.makedirs(run_dir, exist_ok=True)
     tqdm.write(f"[Orch] Run output dir → {run_dir}")
@@ -254,7 +287,8 @@ def main():
     tmp_dir     = tempfile.mkdtemp(prefix="vln_orch_")
     server_log  = os.path.join(tmp_dir, "model_server.log")
     server_proc = start_model_server(args.model_gpu, args.port, args.model_path, server_log,
-                                     chunk_size=args.chunk_size)
+                                     chunk_size=args.chunk_size,
+                                     generate_cfg=args.generate_cfg)
     try:
         wait_server_healthy(server_url)
     except RuntimeError:
@@ -333,6 +367,16 @@ def main():
                 success_distance = args.success_distance,
                 progress_file = prog_file,
                 log_file      = log_file,
+                web_port      = (args.web_base_port + w_idx) if args.web_base_port is not None else None,
+                web_env_idx   = args.web_env_idx,
+                web_output_dir= os.path.join(run_dir, f"web_viewer/worker_{w_idx}_{scan}")
+                                if args.web_base_port is not None else None,
+                video_output_dir= (
+                    os.path.join(args.video_output_dir, data_tag, ts_min, scan)
+                    if args.video_output_dir
+                    else os.path.join(video_root, scan)
+                ),
+                video_fps     = args.video_fps,
             )
             futures[fut] = {
                 "scene_id":  scene_id,
@@ -478,8 +522,19 @@ def main():
     except subprocess.TimeoutExpired:
         server_proc.kill()
 
+    # Add worker-logs here!!!! can be deleted
     import shutil
+    # Preserve worker / server logs for postmortem before deleting tmp_dir
+    logs_dst = os.path.join(run_dir, "logs")
+    os.makedirs(logs_dst, exist_ok=True)
+    for fname in os.listdir(tmp_dir):
+        if fname.endswith(".log") or fname.endswith("_progress.json"):
+            try:
+                shutil.copy2(os.path.join(tmp_dir, fname), os.path.join(logs_dst, fname))
+            except Exception:
+                pass
     shutil.rmtree(tmp_dir, ignore_errors=True)
+    tqdm.write(f"[Orch] Logs saved to {logs_dst}")
 
     tqdm.write("[Orch] Done.")
 

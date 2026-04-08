@@ -57,6 +57,7 @@ def sim_constants(cfg) -> dict:
         "STEP_TURN":          np.deg2rad(sim.TURN_ANGLE),
         "ALLOW_SLIDING":      sim.ALLOW_SLIDING,
         "MAX_STEP_HEIGHT":    sim.MAX_STEP_HEIGHT,
+        "AGENT_RADIUS":       sim.get("AGENT_RADIUS", 0.18),
         "CAM_RES":            (sim.RGB_SENSOR.WIDTH, sim.RGB_SENSOR.HEIGHT),
         "FOV":                sim.RGB_SENSOR.HFOV,
         "LIGHT_SCALE":        sim.LIGHT_SCALE,

@@ -8,9 +8,52 @@ import shutil
 import json
 import random
 import time
+import argparse
+import subprocess
 import cv2
 
 from genark_web_viewer import WebBroadcaster
+
+
+def _annotate_frame(rgb: np.ndarray, step: int, action_str: str,
+                    instruction: str) -> np.ndarray:
+    """Overlay step/action/instruction on an RGB frame; returns BGR for cv2.imwrite."""
+    frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 60), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay, 0.5, frame, 0.5, 0)
+    line1 = f"step={step}  action={action_str}  [GT]"
+    cv2.putText(frame, line1, (6, 20), font, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+    words = instruction.split()
+    lines, cur = [], ""
+    for w_word in words:
+        test = (cur + " " + w_word).strip()
+        if cv2.getTextSize(test, font, 0.45, 1)[0][0] > frame.shape[1] - 12:
+            lines.append(cur); cur = w_word
+        else:
+            cur = test
+    if cur:
+        lines.append(cur)
+    for i, ln in enumerate(lines[:2]):
+        cv2.putText(frame, ln, (6, 42 + i * 16), font, 0.45, (200, 255, 200), 1, cv2.LINE_AA)
+    return frame
+
+
+def _compile_mp4(frames_dir: str, output_path: str, fps: int = 5) -> None:
+    ffmpeg_bin = "/usr/bin/ffmpeg"
+    if not os.path.isfile(ffmpeg_bin):
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    pattern = os.path.join(frames_dir, "frame_%06d.jpg")
+    cmd = [
+        ffmpeg_bin, "-y", "-loglevel", "error",
+        "-framerate", str(fps), "-i", pattern,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        output_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=300)
 
 # --- File Paths (CHANGE THESE TO YOUR ACTUAL FILE PATHS) ---
 EPISODES_FILE = "/data1/home/clk/project/genark/episodes/mp3d_8194nk5LbLH.json"
@@ -40,20 +83,29 @@ STEP_TURN = np.deg2rad(15.0)
 ALLOW_SLIDING = True
 MAX_STEP_HEIGHT = 0.5
 
-def load_data(num_envs):
-    """Loads and samples episodes from the JSON file."""
-    print(f"Loading data from {EPISODES_FILE}...")
-    with open(EPISODES_FILE, 'r') as f:
+def load_data(num_envs, episodes_file=None, episode_ids=None):
+    """Loads episodes. If episode_ids is set, return exactly those (in order).
+    Otherwise sample num_envs random episodes (legacy behavior)."""
+    path = episodes_file or EPISODES_FILE
+    print(f"Loading data from {path}...")
+    with open(path, 'r') as f:
         data = json.load(f)
-    
     all_episodes = data['episodes']
-    total_episodes = len(all_episodes)
-    print(f"Found {total_episodes} episodes.")
-    
-    sampled_episodes = random.choices(all_episodes, k=num_envs)
-    print(f"Sampled {len(sampled_episodes)} episodes for parallel execution.")
-    
-    return sampled_episodes
+    print(f"Found {len(all_episodes)} episodes in file.")
+
+    if episode_ids is not None:
+        wanted = set(int(x) for x in episode_ids)
+        filtered = [ep for ep in all_episodes if int(ep['episode_id']) in wanted]
+        print(f"Filtered to {len(filtered)} episodes by episode_ids.")
+        return filtered
+
+    if num_envs is None or num_envs <= 0 or num_envs >= len(all_episodes):
+        print(f"Returning all {len(all_episodes)} episodes.")
+        return all_episodes
+
+    sampled = random.choices(all_episodes, k=num_envs)
+    print(f"Sampled {len(sampled)} episodes for parallel execution.")
+    return sampled
 
 # --- GPU NavMesh Logic ---
 
@@ -263,8 +315,12 @@ def calculate_initial_yaw_tensor(rotations):
     dir_y_g = -dir_z_h
     return torch.atan2(dir_y_g, dir_x_g)
 
-def run_parallel_episodes(num_envs: int):
-    episodes = load_data(num_envs)
+def run_parallel_episodes(num_envs: int, episodes_file: str | None = None,
+                          episode_ids: list | None = None,
+                          video_output_dir: str | None = None,
+                          video_fps: int = 5,
+                          enable_web: bool = True):
+    episodes = load_data(num_envs, episodes_file=episodes_file, episode_ids=episode_ids)
     if not episodes:
         print("No episodes loaded.")
         return
@@ -352,10 +408,28 @@ def run_parallel_episodes(num_envs: int):
     # Build scene with N parallel environments
     # env_spacing=(0.0, 0.0) ensures all environments are superimposed at the origin,
     # so we don't need to handle coordinate offsets for NavMesh or Camera.
-    scene.build(n_envs=num_envs, env_spacing=(0.0, 0.0))
+    scene.build(n_envs=len(episodes), env_spacing=(0.0, 0.0))
+
+    # Per-episode MP4 recorder (one MP4 per agent)
+    record_video = video_output_dir is not None
+    ep_frame_dirs = [None] * len(episodes)
+    ep_frame_counts = [0] * len(episodes)
+    ep_compiled = [False] * len(episodes)
+    instructions_text = [
+        ep.get("instruction_text") or ep.get("instruction", {}).get("instruction_text", "")
+        for ep in episodes
+    ]
+    if record_video:
+        os.makedirs(video_output_dir, exist_ok=True)
+        for i, ep in enumerate(episodes):
+            d = os.path.join(video_output_dir, f"_tmp_{ep['episode_id']}")
+            os.makedirs(d, exist_ok=True)
+            ep_frame_dirs[i] = d
+        print(f"[gt_path] per-episode MP4 recording → {video_output_dir} "
+              f"({len(episodes)} episodes, fps={video_fps})")
 
     broadcaster = None
-    if WEB_VIEWER:
+    if WEB_VIEWER and enable_web:
         broadcaster = WebBroadcaster(
             output_dir="genark_web_output_gt",
             port=WEB_PORT,
@@ -459,6 +533,31 @@ def run_parallel_episodes(num_envs: int):
                 "active": active_count_web,
                 "total_envs": N,
             })
+
+        # Per-episode MP4 frame capture (snapshot before action consumed this step)
+        if record_video:
+            rgb_cpu_all = rgb_batch.cpu().numpy()
+            finished_cpu = finished.cpu().numpy()
+            cur_step_cpu = current_step.cpu().numpy()
+            ep_lens_cpu = episode_lengths.cpu().numpy()
+            for i in range(N):
+                if ep_compiled[i]:
+                    continue
+                if finished_cpu[i]:
+                    continue
+                # Look up the action this agent is about to execute (for overlay)
+                k = int(cur_step_cpu[i])
+                if k < ep_lens_cpu[i]:
+                    a_int = int(actions_list[i][k])
+                else:
+                    a_int = 0
+                act_str = ACTION_MAP.get(a_int, "?")
+                bgr = _annotate_frame(rgb_cpu_all[i], step_idx, act_str,
+                                      instructions_text[i])
+                fp = os.path.join(ep_frame_dirs[i],
+                                  f"frame_{ep_frame_counts[i]:06d}.jpg")
+                cv2.imwrite(fp, bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                ep_frame_counts[i] += 1
 
         if SAVE_IMAGES:
             # Move to CPU memory and store in list
@@ -635,14 +734,50 @@ def run_parallel_episodes(num_envs: int):
     if broadcaster is not None:
         broadcaster.finish()
 
+    # Compile per-episode MP4s
+    if record_video:
+        for i in range(N):
+            if ep_compiled[i] or ep_frame_counts[i] == 0:
+                continue
+            ep_id = episodes[i]['episode_id']
+            mp4 = os.path.join(video_output_dir, f"episode_{ep_id}.mp4")
+            try:
+                _compile_mp4(ep_frame_dirs[i], mp4, video_fps)
+                print(f"  saved {mp4} ({ep_frame_counts[i]} frames)")
+            except Exception as e:
+                print(f"  ffmpeg failed for ep {ep_id}: {e}")
+            finally:
+                shutil.rmtree(ep_frame_dirs[i], ignore_errors=True)
+                ep_compiled[i] = True
+
     print("All episodes finished.")
 
-    if broadcaster is not None:
+    if broadcaster is not None and enable_web:
         broadcaster.wait_for_exit()
 
 if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--episodes_file", type=str, default=None,
+                   help="Episode JSON (must have 'actions' field). Default: hardcoded EPISODES_FILE")
+    p.add_argument("--episode_ids", type=int, nargs="+", default=None,
+                   help="If set, only run episodes whose episode_id is in this list")
+    p.add_argument("--num_envs", type=int, default=NUM_PARALLEL_ENVS,
+                   help="Used only when --episode_ids is not given")
+    p.add_argument("--video_output_dir", type=str, default=None,
+                   help="If set, save one MP4 per episode (episode_<id>.mp4)")
+    p.add_argument("--video_fps", type=int, default=5)
+    p.add_argument("--no_web", action="store_true",
+                   help="Disable WebBroadcaster (no HTTP viewer, no wait_for_exit)")
+    args = p.parse_args()
     try:
-        run_parallel_episodes(num_envs=NUM_PARALLEL_ENVS)
+        run_parallel_episodes(
+            num_envs=args.num_envs,
+            episodes_file=args.episodes_file,
+            episode_ids=args.episode_ids,
+            video_output_dir=args.video_output_dir,
+            video_fps=args.video_fps,
+            enable_web=not args.no_web,
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()
