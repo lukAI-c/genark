@@ -152,9 +152,10 @@ def run_worker(
     web_output_dir:   str | None = None,
     video_output_dir: str | None = None,
     video_fps:        int = 5,
+    use_glb:          bool = False,
 ) -> dict:
     """
-    Launch one env_worker.py subprocess for a single scene.
+    Launch one env_worker.py or env_worker_glb.py subprocess for a single scene.
     Returns the metrics dict (episode_id → metrics).
     """
     ep_file  = os.path.join(tmp_dir, f"worker_{worker_idx}_episodes.json")
@@ -166,8 +167,12 @@ def run_worker(
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
+    # Select worker script based on rendering path
+    worker_script = WORKER_SCRIPT.replace("env_worker.py",
+                                          "env_worker_glb.py" if use_glb else "env_worker.py")
+
     cmd = [
-        sys.executable, WORKER_SCRIPT,
+        sys.executable, worker_script,
         "--scene_id",      scene_id,
         "--episodes_file", ep_file,
         "--server_url",    server_url,
@@ -229,6 +234,8 @@ def parse_args():
                    help="If set, save one MP4 per episode under <run_dir>/videos/<scan>/")
     p.add_argument("--video_fps",        type=int, default=5,
                    help="FPS for per-episode MP4 output (default: 5)")
+    p.add_argument("--use_glb",          action="store_true", default=False,
+                   help="Use GLB rendering path (auto-converts OBJ to GLB); default: OBJ-only")
     cli = p.parse_args()
 
     # Load YAML config and merge: CLI overrides > YAML
@@ -377,6 +384,7 @@ def main():
                     else os.path.join(video_root, scan)
                 ),
                 video_fps     = args.video_fps,
+                use_glb       = args.use_glb,
             )
             futures[fut] = {
                 "scene_id":  scene_id,

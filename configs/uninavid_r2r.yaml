@@ -35,8 +35,8 @@ GENERATE:
 
 # ---- Parallel mode (orchestrator.py + env_worker.py) ----
 PARALLEL:
-  MODEL_GPU:      2
-  WORKER_GPUS:    [3, 4]
+  MODEL_GPU:      3
+  WORKER_GPUS:    [4, 5]
   PORT:           8100
   MAX_PARALLEL:   300           # max episodes per scene (Vulkan VRAM) **scene**
   MAX_CONCURRENT: null        # defaults to len(WORKER_GPUS)

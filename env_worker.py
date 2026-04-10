@@ -374,16 +374,18 @@ def run_scene(scene_id: str, scene_episodes: list, server_url: str,
     )
 
     # ----------------------------------------------------------------
-    # 2. Load scene mesh
+    # 2. Load scene mesh (OBJ)
     # ----------------------------------------------------------------
     obj_dir = f"{SCENE_DATASETS}/{SCAN_NAME}/matterport_mesh"
     obj_files = [f for f in os.listdir(obj_dir) if f.endswith(".obj")]
     if not obj_files:
-        print(f"[ERROR] No .obj found for {SCAN_NAME}", flush=True)
+        print(f"[ERROR] No .obj found in {obj_dir}", flush=True)
         _write_empty(output_file)
         return
+    mesh_path = os.path.join(obj_dir, obj_files[0])
+    print(f"[{SCAN_NAME}] Loading mesh: {mesh_path}", flush=True)
     scene.add_entity(morph=gs.morphs.Mesh(
-        file=os.path.join(obj_dir, obj_files[0]), fixed=True, collision=False
+        file=mesh_path, fixed=True, collision=False
     ))
 
     # ----------------------------------------------------------------
@@ -465,11 +467,13 @@ def run_scene(scene_id: str, scene_episodes: list, server_url: str,
     # ----------------------------------------------------------------
     # 7. Initial floor snap + camera pose
     # ----------------------------------------------------------------
-    _, _, current_tri_idx = batch_find_floor(
+    valid_init, init_z, current_tri_idx = batch_find_floor(
         cam_pos[:, :2], cam_pos[:, 2] - CAMERA_HEIGHT,
         tri_v0_2d, tri_v1_2d, tri_v2_2d,
         tri_v0_3d, tri_v1_3d, tri_v2_3d,
     )
+    # CRITICAL: Snap Z coordinate to floor (like movement code does)
+    cam_pos[:, 2] = init_z + CAMERA_HEIGHT
     _update_camera(cam, cam_pos, cam_yaw)
 
     # # Diagnostic: log initial camera positions (first render test)
