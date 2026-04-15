@@ -230,10 +230,6 @@ def parse_args():
                    help="If set, worker w gets HTTP viewer on (web_base_port + w)")
     p.add_argument("--web_env_idx",      type=int, default=0,
                    help="Which env (0..N-1) in each parallel batch to broadcast")
-    p.add_argument("--video_output_dir", type=str, default=None,
-                   help="If set, save one MP4 per episode under <run_dir>/videos/<scan>/")
-    p.add_argument("--video_fps",        type=int, default=5,
-                   help="FPS for per-episode MP4 output (default: 5)")
     p.add_argument("--use_glb",          action="store_true", default=False,
                    help="Use GLB rendering path (auto-converts OBJ to GLB); default: OBJ-only")
     cli = p.parse_args()
@@ -255,6 +251,9 @@ def parse_args():
     cli.fov            = cli.fov           if cli.fov is not None else sc["FOV"]
     cli.light_scale       = cli.light_scale   if cli.light_scale is not None else sc["LIGHT_SCALE"]
     cli.success_distance  = cli.success_distance if cli.success_distance is not None else sc["SUCCESS_DISTANCE"]
+    cli.save_video        = cfg.PARALLEL.SAVE_VIDEO
+    cli.video_output_dir  = cfg.PARALLEL.VIDEO_OUTPUT_DIR
+    cli.video_fps         = cfg.PARALLEL.VIDEO_FPS
 
     # Generate params (from YAML only, no CLI override needed)
     gen = cfg.get("GENERATE", {})
@@ -274,8 +273,8 @@ def main():
     model_tag = os.path.basename(args.model_path.rstrip("/"))
     data_tag = os.path.splitext(os.path.basename(args.episodes_file))[0]
     out_root = os.path.join(os.path.dirname(__file__), "output_parallel")
-    # genesis_videos/<data_tag>/<ts_min>/  — shared across all workers this run
-    video_root = os.path.join(os.path.dirname(__file__), "genesis_videos", data_tag, ts_min)
+    # video root from config: <VIDEO_OUTPUT_DIR>/<data_tag>/<ts_min>/
+    video_root = os.path.join(os.path.dirname(__file__), args.video_output_dir, data_tag, ts_min)
     run_dir = os.path.join(out_root, f"{ts}__{model_tag}__{data_tag}__P{args.max_parallel}__C{max_conc}")
     os.makedirs(run_dir, exist_ok=True)
     tqdm.write(f"[Orch] Run output dir → {run_dir}")
@@ -378,11 +377,7 @@ def main():
                 web_env_idx   = args.web_env_idx,
                 web_output_dir= os.path.join(run_dir, f"web_viewer/worker_{w_idx}_{scan}")
                                 if args.web_base_port is not None else None,
-                video_output_dir= (
-                    os.path.join(args.video_output_dir, data_tag, ts_min, scan)
-                    if args.video_output_dir
-                    else os.path.join(video_root, scan)
-                ),
+                video_output_dir= os.path.join(video_root, scan) if args.save_video else None,
                 video_fps     = args.video_fps,
                 use_glb       = args.use_glb,
             )
