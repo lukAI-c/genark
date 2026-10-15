@@ -6,9 +6,9 @@
 
 # no need proxy:NO_PROXY=127.0.0.1,localhost python orchestrator.py --video_fps 5 --use_glb
 # ---- Data & Model ----
-EPISODES_FILE:  /data1/home/clk/navid_ws/data/datasets/R2R_VLNCE_v1-3_preprocessed/val_unseen/val_unseen.json.gz
-# EPISODES_FILE:  /data1/home/clk/navid_ws/data/datasets/OpenNav_R2R-CE_100_bertidx.json
-SCENE_DATASETS: /data1/home/clk/project/genark/scene_datasets
+# EPISODES_FILE:  /home/clk/genark_ws/genark/data/datasets/R2R_VLNCE_v1-3_preprocessed/val_unseen/val_unseen.json.gz
+EPISODES_FILE:  /home/clk/genark_ws/genark/data/datasets/OpenNav_R2R-CE_100_bertidx.json
+SCENE_DATASETS: /home/clk/genark_ws/genark/scene_datasets
 MODEL_PATH:     model_zoo/uninavid-7b-full-224-video-fps-1-grid-2
  
 
@@ -40,12 +40,12 @@ GENERATE:
 # ---- Parallel mode (orchestrator.py + env_worker.py) ----
 PARALLEL:
   MODEL_GPU:      2
-  WORKER_GPUS:    [3, 4, 5]
+  WORKER_GPUS:    [3, 4, 5, 6, 7]
   PORT:           8100
   MAX_PARALLEL:   300           # max episodes per scene (Vulkan VRAM) **scene**
   MAX_CONCURRENT: null        # defaults to len(WORKER_GPUS)
-  CHUNK_SIZE:     8          # max batch size per LLM generate call (防止 OOM) **generate**
-  SAVE_VIDEO:     false
+  CHUNK_SIZE:     32          # max batch size per LLM generate call (防止 OOM) **generate**
+  SAVE_VIDEO:     true
   VIDEO_OUTPUT_DIR: genesis_videos   # 视频保存根目录，实际路径: <VIDEO_OUTPUT_DIR>/<data_tag>/<timestamp>/<scene>/
   VIDEO_FPS:      5
 # ---- Serial mode (genesis_uninavid_multi.py) ----

@@ -1,0 +1,154 @@
+diff --git a/genesis/engine/mesh.py b/genesis/engine/mesh.py
+index 72c6eda..2a69907 100644
+--- a/genesis/engine/mesh.py
++++ b/genesis/engine/mesh.py
+@@ -331,7 +331,17 @@ class Mesh(RBC):
+ 
+     @classmethod
+     def from_attrs(
+-        cls, verts, faces, normals=None, surface=None, uvs=None, scale=None, metadata=None, is_mesh_zup=True
++        cls,
++        verts,
++        faces,
++        normals=None,
++        surface=None,
++        uvs=None,
++        scale=None,
++        metadata=None,
++        is_mesh_zup=True,
++        visual_texture=None,
++        visual_image=None,
+     ):
+         """
+         Create a genesis.Mesh from mesh attributes including vertices, faces, and normals.
+@@ -341,7 +351,9 @@ class Mesh(RBC):
+ 
+         metadata = metadata or {}
+         metadata["is_visual_overwritten"] = metadata.get("is_visual_overwritten") or (surface.texture is not None)
+-        visual = mu.surface_uvs_to_trimesh_visual(surface, uvs, len(verts))
++        visual = mu.surface_uvs_to_trimesh_visual(
++            surface, uvs, len(verts), texture=visual_texture, image=visual_image
++        )
+ 
+         tmesh = trimesh.Trimesh(
+             vertices=verts,
+diff --git a/genesis/utils/mesh.py b/genesis/utils/mesh.py
+index f6beee3..4d0560f 100644
+--- a/genesis/utils/mesh.py
++++ b/genesis/utils/mesh.py
+@@ -73,7 +73,7 @@ class MeshInfo:
+         self.uvs.append(uvs)
+         self.n_points += len(verts)
+ 
+-    def export_mesh(self, scale, is_mesh_zup):
++    def export_mesh(self, scale, is_mesh_zup, visual_texture=None, visual_image=None):
+         uvs = None
+         if self.uvs:
+             for i, (uvs, verts) in enumerate(zip(self.uvs, self.verts)):
+@@ -94,6 +94,8 @@ class MeshInfo:
+             scale=scale,
+             metadata=self.metadata,
+             is_mesh_zup=is_mesh_zup,
++            visual_texture=visual_texture,
++            visual_image=visual_image,
+         )
+ 
+ 
+@@ -110,7 +112,18 @@ class MeshInfoGroup:
+         return mesh_info, first_created
+ 
+     def export_meshes(self, scale, is_mesh_zup):
+-        return [mesh_info.export_mesh(scale, is_mesh_zup) for mesh_info in self.infos.values()]
++        visual_cache = {}
++        meshes = []
++        for mesh_info in self.infos.values():
++            surface_id = id(mesh_info.surface)
++            cached_visual = visual_cache.get(surface_id)
++            if cached_visual is None:
++                texture = mesh_info.surface.get_rgba()
++                image = Image.fromarray(texture.image_array) if isinstance(texture, gs.textures.ImageTexture) else None
++                cached_visual = (texture, image)
++                visual_cache[surface_id] = cached_visual
++            meshes.append(mesh_info.export_mesh(scale, is_mesh_zup, *cached_visual))
++        return meshes
+ 
+ 
+ def get_asset_path(file):
+@@ -215,8 +228,8 @@ def compute_sdf_data(mesh, res):
+     return sdf_data
+ 
+ 
+-def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
+-    texture = surface.get_rgba()
++def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None, texture=None, image=None):
++    texture = surface.get_rgba() if texture is None else texture
+ 
+     if isinstance(texture, gs.textures.ImageTexture):
+         if uvs is not None:
+@@ -226,7 +239,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
+             visual = trimesh.visual.TextureVisuals(
+                 uv=uvs,
+                 material=trimesh.visual.material.SimpleMaterial(
+-                    image=Image.fromarray(texture.image_array), diffuse=(1.0, 1.0, 1.0, 1.0)
++                    image=Image.fromarray(texture.image_array) if image is None else image, diffuse=(1.0, 1.0, 1.0, 1.0)
+                 ),
+             )
+         else:
+diff --git a/genesis/vis/batch_renderer.py b/genesis/vis/batch_renderer.py
+index 00962be..4a3278c 100644
+--- a/genesis/vis/batch_renderer.py
++++ b/genesis/vis/batch_renderer.py
+@@ -1,3 +1,4 @@
++import hashlib
+ import math
+ 
+ import numpy as np
+@@ -30,6 +31,20 @@ def _make_tensor(data, *, dtype: torch.dtype = torch.float32):
+     return torch.tensor(data, dtype=dtype, device=gs.device)
+ 
+ 
++def _texture_cache_key(texture):
++    """Return a stable key for file-backed and embedded texture images."""
++    if texture.image_path is not None:
++        return ("path", texture.image_path)
++
++    image = np.ascontiguousarray(texture.image_array)
++    return (
++        "embedded",
++        image.shape,
++        image.dtype.str,
++        hashlib.blake2b(image.data, digest_size=16).digest(),
++    )
++
++
+ class GenesisGeomRetriever:
+     def __init__(self, rigid_solver, seg_level):
+         self.rigid_solver = rigid_solver
+@@ -119,19 +134,23 @@ class GenesisGeomRetriever:
+         texture_offsets = []
+         texture_data = []
+         total_texture_size = 0
++        surface_rgba_cache = {}
+ 
+         for vgeom in vgeoms:
+             geom_surface = vgeom.surface
+-            geom_textures = geom_surface.get_rgba(batch=True).textures
++            surface_id = id(geom_surface)
++            geom_textures = surface_rgba_cache.get(surface_id)
++            if geom_textures is None:
++                geom_textures = geom_surface.get_rgba(batch=True).textures
++                surface_rgba_cache[surface_id] = geom_textures
+ 
+             geom_texture_indices = []
+             for geom_texture in geom_textures:
+                 if isinstance(geom_texture, gs.textures.ImageTexture) and geom_texture.image_array is not None:
+-                    texture_id = geom_texture.image_path
++                    texture_id = _texture_cache_key(geom_texture)
+                     if texture_id not in texture_indices:
+                         texture_idx = num_textures
+-                        if texture_id is not None:
+-                            texture_indices[texture_id] = texture_idx
++                        texture_indices[texture_id] = texture_idx
+                         texture_widths.append(geom_texture.image_array.shape[1])
+                         texture_heights.append(geom_texture.image_array.shape[0])
+                         assert geom_texture.channel == 4

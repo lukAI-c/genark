@@ -22,6 +22,7 @@ model_zoo/
 
 # Large data files
 metrics_final.json
+data/
 
 # Video output
 *.mp4

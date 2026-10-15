@@ -105,7 +105,7 @@ if os.path.exists(_DEFAULT_CFG):
 else:
     _sc = {}
 
-SCENE_DATASETS  = "/data1/home/clk/project/genark/scene_datasets"
+SCENE_DATASETS  = _sc.get("SCENE_DATASETS", "/home/clk/genark_ws/genark/scene_datasets")
 CAMERA_HEIGHT   = _sc.get("CAMERA_HEIGHT",   1.25)
 STEP_MOVE       = _sc.get("STEP_MOVE",       0.25)
 STEP_TURN       = _sc.get("STEP_TURN",       np.deg2rad(30.0))

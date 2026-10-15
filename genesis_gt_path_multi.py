@@ -10,6 +10,7 @@ import random
 import time
 import argparse
 import subprocess
+import gzip
 import cv2
 
 from genark_web_viewer import WebBroadcaster
@@ -56,8 +57,15 @@ def _compile_mp4(frames_dir: str, output_path: str, fps: int = 5) -> None:
     subprocess.run(cmd, check=True, timeout=300)
 
 # --- File Paths (CHANGE THESE TO YOUR ACTUAL FILE PATHS) ---
-EPISODES_FILE = "/data1/home/clk/project/genark/episodes/mp3d_8194nk5LbLH.json"
-SCENE_DATASETS = "/data1/home/clk/project/genark/scene_datasets"
+EPISODES_FILE = "/home/clk/genark_ws/genark/data/datasets/zsNo4HB9uLZ_episodes.json"
+# Default GT pools (searched in order) for files that don't have a sibling *_gt.
+R2R_PREPROCESSED_DIR = "/home/clk/genark_ws/genark/data/datasets/R2R_VLNCE_v1-3_preprocessed"
+DEFAULT_GT_CANDIDATES = [
+    f"{R2R_PREPROCESSED_DIR}/val_unseen/val_unseen_gt.json.gz",
+    f"{R2R_PREPROCESSED_DIR}/val_seen/val_seen_gt.json.gz",
+    f"{R2R_PREPROCESSED_DIR}/train/train_gt.json.gz",
+]
+SCENE_DATASETS = "/home/clk/genark_ws/genark/scene_datasets"
 
 # --- Constants & Configuration ---
 NUM_PARALLEL_ENVS = 256 
@@ -83,15 +91,119 @@ STEP_TURN = np.deg2rad(15.0)
 ALLOW_SLIDING = True
 MAX_STEP_HEIGHT = 0.5
 
-def load_data(num_envs, episodes_file=None, episode_ids=None):
-    """Loads episodes. If episode_ids is set, return exactly those (in order).
-    Otherwise sample num_envs random episodes (legacy behavior)."""
+def _open_json(path):
+    """Open .json or .json.gz and return parsed content."""
+    if path.endswith('.gz'):
+        with gzip.open(path, 'rt') as f:
+            return json.load(f)
+    with open(path, 'r') as f:
+        return json.load(f)
+
+
+def load_data(num_envs, episodes_file=None, episode_ids=None, scene=None,
+              gt_file=None):
+    """Load episodes and merge GT action sequences.
+
+    `episodes_file` is a guide-style JSON (plain or .gz) with an `episodes`
+    list. Each episode is merged with GT actions from `gt_file` (a dict keyed
+    by episode_id with `actions`/`locations`/`forward_steps`). If `gt_file` is
+    None, a sibling `*_gt.json(.gz)` is searched first, then the defaults in
+    `DEFAULT_GT_CANDIDATES` are tried until all episode ids resolve.
+
+    The simulator builds one scene per run, so episodes are filtered down to a
+    single scene (either the one passed via `scene`, or the scene with the
+    most episodes in the file).
+    """
     path = episodes_file or EPISODES_FILE
     print(f"Loading data from {path}...")
-    with open(path, 'r') as f:
-        data = json.load(f)
+    data = _open_json(path)
     all_episodes = data['episodes']
     print(f"Found {len(all_episodes)} episodes in file.")
+
+    # Locate GT source(s)
+    gt_paths = []
+    if gt_file is not None:
+        gt_paths = [gt_file]
+    else:
+        for suf in ('.json.gz', '.json'):
+            if path.endswith(suf):
+                cand = path[:-len(suf)] + '_gt' + suf
+                if os.path.isfile(cand):
+                    gt_paths.append(cand)
+                break
+        gt_paths.extend(p for p in DEFAULT_GT_CANDIDATES if os.path.isfile(p))
+    if not gt_paths:
+        raise FileNotFoundError("No GT file found. Pass --gt_file explicitly.")
+
+    # Merge GT, also pulling start_position/start_rotation from the matching
+    # guide episode (sibling of the *_gt file). The GT action sequence was
+    # computed from the guide's starting pose, so we must use that pose here.
+    # Match guide episodes by (scene_id, trajectory_id) first, falling back to
+    # episode_id — this handles datasets like OpenNav that keep trajectory_id
+    # stable but renumber episode_ids (or perturb start poses).
+    merged_by_local_key = {}  # keyed by id(ep) for stable dedup
+    for gp in gt_paths:
+        print(f"Loading GT actions from {gp}...")
+        gt = _open_json(gp)
+
+        # Locate sibling guide file
+        guide_path = None
+        for suf in ('.json.gz', '.json'):
+            if gp.endswith('_gt' + suf):
+                cand = gp[:-len('_gt' + suf)] + suf
+                if os.path.isfile(cand):
+                    guide_path = cand
+                    break
+        guide_by_traj = {}
+        guide_by_id = {}
+        if guide_path is not None:
+            print(f"  (pulling guide poses from {guide_path})")
+            gdata = _open_json(guide_path)
+            for gep in gdata['episodes']:
+                guide_by_id[str(gep['episode_id'])] = gep
+                tk = (gep['scene_id'], gep.get('trajectory_id'))
+                if tk[1] is not None:
+                    guide_by_traj[tk] = gep
+
+        for ep in all_episodes:
+            if id(ep) in merged_by_local_key:
+                continue
+            # Prefer (scene, trajectory_id) match; fall back to episode_id
+            tk = (ep['scene_id'], ep.get('trajectory_id'))
+            gep = guide_by_traj.get(tk) if tk[1] is not None else None
+            if gep is None:
+                gep = guide_by_id.get(str(ep['episode_id']))
+            gt_key = str(gep['episode_id']) if gep is not None else str(ep['episode_id'])
+            if gt_key not in gt:
+                continue
+            ep_copy = dict(ep)
+            ep_copy['actions'] = gt[gt_key]['actions']
+            if gep is not None:
+                ep_copy['start_position'] = gep['start_position']
+                ep_copy['start_rotation'] = gep['start_rotation']
+            merged_by_local_key[id(ep)] = ep_copy
+        if len(merged_by_local_key) == len(all_episodes):
+            break
+
+    missing = len(all_episodes) - len(merged_by_local_key)
+    if missing:
+        print(f"Warning: {missing} episodes had no GT entry and were dropped.")
+    all_episodes = [merged_by_local_key[id(ep)]
+                    for ep in all_episodes if id(ep) in merged_by_local_key]
+
+    # Filter to a single scene (simulator loads one mesh per run)
+    scenes = {}
+    for ep in all_episodes:
+        scenes.setdefault(ep['scene_id'], []).append(ep)
+    if scene is not None:
+        chosen = next((s for s in scenes if scene in s), None)
+        if chosen is None:
+            raise ValueError(f"Scene '{scene}' not found. Available: "
+                             f"{sorted(os.path.basename(os.path.dirname(s)) for s in scenes)}")
+    else:
+        chosen = max(scenes, key=lambda s: len(scenes[s]))
+    all_episodes = scenes[chosen]
+    print(f"Filtered to scene '{chosen}': {len(all_episodes)} episodes.")
 
     if episode_ids is not None:
         wanted = set(int(x) for x in episode_ids)
@@ -319,8 +431,12 @@ def run_parallel_episodes(num_envs: int, episodes_file: str | None = None,
                           episode_ids: list | None = None,
                           video_output_dir: str | None = None,
                           video_fps: int = 5,
-                          enable_web: bool = True):
-    episodes = load_data(num_envs, episodes_file=episodes_file, episode_ids=episode_ids)
+                          enable_web: bool = True,
+                          scene: str | None = None,
+                          gt_file: str | None = None):
+    episodes = load_data(num_envs, episodes_file=episodes_file,
+                         episode_ids=episode_ids, scene=scene,
+                         gt_file=gt_file)
     if not episodes:
         print("No episodes loaded.")
         return
@@ -340,16 +456,14 @@ def run_parallel_episodes(num_envs: int, episodes_file: str | None = None,
     )
 
     # --- 2. Load Scene ---
-    obj_dir = f"{SCENE_DATASETS}/{SCAN_NAME}/matterport_mesh"
-    try:
-        obj_files = [f for f in os.listdir(obj_dir) if f.endswith('.obj')]
-        if not obj_files:
-            raise FileNotFoundError
-        obj_path = os.path.join(obj_dir, obj_files[0])
-        scene.add_entity(morph=gs.morphs.Mesh(file=obj_path, fixed=True, collision=False))
-    except (FileNotFoundError, IndexError):
-        print(f"Error: No .obj file found for SCAN_NAME '{SCAN_NAME}'")
+    glb_path = f"/home/clk/genark_ws/genark/glb_cache/{SCAN_NAME}.glb"
+    if not os.path.isfile(glb_path):
+        print(f"Error: .glb file not found at '{glb_path}'")
         return
+    scene.add_entity(morph=gs.morphs.Mesh(
+        file=glb_path, fixed=True, collision=False,
+        euler=(-90.0, 0.0, 0.0),  # Habitat Y-up -> Genesis Z-up
+    ))
 
     # --- 3. Load NavMesh & Convert to GPU ---
     navmesh_npz_path = f"{SCENE_DATASETS}/{SCAN_NAME}/navmesh.npz"
@@ -464,6 +578,11 @@ def run_parallel_episodes(num_envs: int, episodes_file: str | None = None,
         tri_v0_3d, tri_v1_3d, tri_v2_3d
     )
 
+    # Fixed world Z-up, broadcast to per-env. Re-supplied every set_pose call
+    # to overwrite any stale up-vector left in the shared camera buffer.
+    world_up = torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=torch.float32)
+    cam_up = world_up.unsqueeze(0).expand(N, 3).contiguous()
+
     # Initial Pose Update
     dir_x = torch.cos(cam_yaw)
     dir_y = torch.sin(cam_yaw)
@@ -471,9 +590,9 @@ def run_parallel_episodes(num_envs: int, episodes_file: str | None = None,
     target_lookat[:, 0] += dir_x
     target_lookat[:, 1] += dir_y
     target_lookat[:, 2] = cam_pos[:, 2] # Look horizontal
-    
+
     # Update camera (Batched)
-    cam.set_pose(pos=cam_pos, lookat=target_lookat)
+    cam.set_pose(pos=cam_pos, lookat=target_lookat, up=cam_up)
 
     print("Starting simulation loop (GPU accelerated)...")
     
@@ -672,9 +791,10 @@ def run_parallel_episodes(num_envs: int, episodes_file: str | None = None,
         target_lookat[:, 1] += dir_y
         target_lookat[:, 2] = cam_pos[:, 2]
         
-        # Directly pass GPU tensors to set_pose (Batched)
-        # No need to sync to CPU
-        cam.set_pose(pos=cam_pos, lookat=target_lookat)
+        # Directly pass GPU tensors to set_pose (Batched). Re-supply the
+        # fixed Z-up every frame so the shared camera buffer cannot carry
+        # stale up-vectors across steps.
+        cam.set_pose(pos=cam_pos, lookat=target_lookat, up=cam_up)
 
         torch.cuda.synchronize()
         t4 = time.time()
@@ -768,6 +888,12 @@ if __name__ == "__main__":
     p.add_argument("--video_fps", type=int, default=5)
     p.add_argument("--no_web", action="store_true",
                    help="Disable WebBroadcaster (no HTTP viewer, no wait_for_exit)")
+    p.add_argument("--gt_file", type=str, default=None,
+                   help="Explicit GT json(.gz) providing actions per episode_id. "
+                        "If unset, tries sibling *_gt and R2R preprocessed defaults.")
+    p.add_argument("--scene", type=str, default=None,
+                   help="Substring match against scene_id (e.g. 'zsNo4HB9uLZ'). "
+                        "If unset, the scene with the most episodes is chosen.")
     args = p.parse_args()
     try:
         run_parallel_episodes(
@@ -777,6 +903,8 @@ if __name__ == "__main__":
             video_output_dir=args.video_output_dir,
             video_fps=args.video_fps,
             enable_web=not args.no_web,
+            scene=args.scene,
+            gt_file=args.gt_file,
         )
     except Exception as e:
         import traceback

@@ -21,8 +21,8 @@ import uuid
 import threading
 import argparse
 
-sys.path.append("/data1/home/clk/project/Genesis")
-sys.path.append("/data1/home/clk/navid_ws/Uni-NaVid")
+sys.path.append("/home/clk/genark_ws/Genesis")
+sys.path.append("/home/clk/genark_ws/Uni-NaVid")
 
 import numpy as np
 import torch

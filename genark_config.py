@@ -63,4 +63,5 @@ def sim_constants(cfg) -> dict:
         "LIGHT_SCALE":        sim.LIGHT_SCALE,
         "MAX_STEPS":          cfg.TASK.MAX_STEPS,
         "SUCCESS_DISTANCE":   cfg.TASK.SUCCESS_DISTANCE,
+        "SCENE_DATASETS":     cfg.get("SCENE_DATASETS", ""),
     }
